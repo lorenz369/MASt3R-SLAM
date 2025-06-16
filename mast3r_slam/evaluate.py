@@ -104,3 +104,33 @@ def save_ply(filename, points, colors):
     vertex_element = PlyElement.describe(pcd, "vertex")
     ply_data = PlyData([vertex_element], text=False)
     ply_data.write(filename)
+
+
+def save_trajectory_with_intrinsics_and_depth(savedir, filename, keyframes, dataset_intrinsics=None):
+    """Save trajectory with camera intrinsics and depth maps"""
+    savedir = pathlib.Path(savedir)
+    savedir.mkdir(exist_ok=True, parents=True)
+    logfile = savedir / filename
+    
+    # Create depth maps directory
+    depth_dir = savedir / "depth_maps"
+    depth_dir.mkdir(parents=True, exist_ok=True)
+    
+    with open(logfile, "w") as f:
+        for i in range(len(keyframes)):
+            frame = keyframes[i]
+            # Get camera pose
+            T_WC = frame.T_WC
+            t = T_WC.t()
+            q = T_WC.q()
+            
+            # Get camera intrinsics
+            intrinsics = frame.get_intrinsics_string(dataset_intrinsics)
+            
+            # Save depth map
+            depth_path = frame.save_depth_map(depth_dir)
+            if depth_path is None:
+                depth_path = "none"
+            
+            # Write to file: frame_id x y z qx qy qz qw fx fy cx cy k1 k2 p1 p2 k3 depth_map_path
+            f.write(f"{frame.frame_id} {t[0]} {t[1]} {t[2]} {q[0]} {q[1]} {q[2]} {q[3]} {intrinsics} {depth_path}\n")

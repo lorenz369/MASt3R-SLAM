@@ -5,6 +5,8 @@ import lietorch
 import torch
 from mast3r_slam.mast3r_utils import resize_img
 from mast3r_slam.config import config
+import pathlib
+import numpy as np
 
 
 class Mode(Enum):
@@ -29,6 +31,7 @@ class Frame:
     N: int = 0
     N_updates: int = 0
     K: Optional[torch.Tensor] = None
+    dense_depth: Optional[torch.Tensor] = None  # Store original dense depth from MASt3R
 
     def get_score(self, C):
         filtering_score = config["tracking"]["filtering_score"]
@@ -106,6 +109,106 @@ class Frame:
 
     def get_average_conf(self):
         return self.C / self.N if self.C is not None else None
+
+    def get_intrinsics_string(self, dataset_intrinsics=None):
+        """Get camera intrinsics as a string in the format: fx fy cx cy k1 k2 p1 p2 k3
+        
+        Returns:
+            str: Intrinsics string, or estimated intrinsics if no calibration available
+        """
+        if self.K is None:
+            # Estimate reasonable intrinsics based on image size
+            # Common assumption: focal length ≈ image_width for typical cameras
+            height, width = int(self.img_shape[0]), int(self.img_shape[1])
+            fx = fy = width  # Reasonable default focal length
+            cx, cy = width / 2.0, height / 2.0  # Principal point at image center
+            k1, k2, p1, p2, k3 = 0.0, 0.0, 0.0, 0.0, 0.0  # No distortion
+            return f"{fx} {fy} {cx} {cy} {k1} {k2} {p1} {p2} {k3}"
+        
+        # Get focal lengths and principal point from calibrated intrinsics
+        fx = float(self.K[0, 0])
+        fy = float(self.K[1, 1])
+        cx = float(self.K[0, 2])
+        cy = float(self.K[1, 2])
+        
+        # Get distortion coefficients from dataset intrinsics if available
+        k1, k2, p1, p2, k3 = 0.0, 0.0, 0.0, 0.0, 0.0
+        if dataset_intrinsics is not None and hasattr(dataset_intrinsics, 'distortion'):
+            distortion = dataset_intrinsics.distortion
+            if distortion is not None and len(distortion) >= 4:
+                k1 = float(distortion[0]) if len(distortion) > 0 else 0.0
+                k2 = float(distortion[1]) if len(distortion) > 1 else 0.0
+                p1 = float(distortion[2]) if len(distortion) > 2 else 0.0
+                p2 = float(distortion[3]) if len(distortion) > 3 else 0.0
+                k3 = float(distortion[4]) if len(distortion) > 4 else 0.0
+            
+        return f"{fx} {fy} {cx} {cy} {k1} {k2} {p1} {p2} {k3}"
+
+    def save_depth_map(self, output_dir):
+        """Save depth map to file and return the path"""
+        if self.dense_depth is not None:
+            # Use original dense depth map from MASt3R (preferred)
+            output_dir = pathlib.Path(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Extract Z-coordinates (depth) from the dense 3D points
+            # dense_depth shape: [height, width, 3] -> we want [:, :, 2] (Z-coordinate)
+            depth_map = self.dense_depth[:, :, 2].cpu().numpy()
+            
+            # Filter out invalid depths (negative or very close to zero)
+            depth_map[depth_map <= 1e-6] = 0.0
+            
+            # Save depth map
+            depth_path = output_dir / f"depth_{self.frame_id:06d}.npy"
+            np.save(depth_path, depth_map.astype(np.float32))
+            
+            return str(depth_path)
+            
+        elif self.X_canon is not None and self.K is not None:
+            # Fallback: reconstruct depth map from sparse points (original method)
+            output_dir = pathlib.Path(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Project 3D points to image plane
+            # X_canon contains 3D points in camera coordinates
+            points_2d = self.K @ self.X_canon.T  # Shape: [3, N]
+            points_2d = points_2d[:2] / (points_2d[2:3] + 1e-8)  # Avoid division by zero
+            
+            # Create depth map
+            height, width = int(self.img_shape[0]), int(self.img_shape[1])
+            depth_map = torch.zeros(height, width, dtype=torch.float32)
+            
+            # Use Z-coordinate as depth (not Euclidean distance)
+            depths = self.X_canon[:, 2]  # Z-coordinate in camera space
+            
+            # Convert to integer pixel coordinates
+            points_2d = points_2d.T.round().long()  # Shape: [N, 2]
+            
+            # Filter valid points (within image bounds and positive depth)
+            valid = (points_2d[:, 0] >= 0) & (points_2d[:, 0] < width) & \
+                    (points_2d[:, 1] >= 0) & (points_2d[:, 1] < height) & \
+                    (depths > 0)  # Only positive depths
+            
+            # Fill depth map (handle multiple points mapping to same pixel by taking closest)
+            if valid.sum() > 0:
+                valid_points = points_2d[valid]
+                valid_depths = depths[valid]
+                
+                # For pixels with multiple depth values, keep the closest (minimum depth)
+                for i in range(len(valid_points)):
+                    y, x = valid_points[i, 1], valid_points[i, 0]
+                    current_depth = depth_map[y, x]
+                    if current_depth == 0 or valid_depths[i] < current_depth:
+                        depth_map[y, x] = valid_depths[i]
+            
+            # Save depth map
+            depth_path = output_dir / f"depth_{self.frame_id:06d}.npy"
+            np.save(depth_path, depth_map.cpu().numpy())
+            
+            return str(depth_path)
+        else:
+            # No depth information available
+            return None
 
 
 def create_frame(i, img, T_WC, img_size=512, device="cuda:0"):
