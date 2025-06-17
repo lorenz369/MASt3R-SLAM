@@ -119,7 +119,9 @@ class Frame:
         if self.K is None:
             # Estimate reasonable intrinsics based on image size
             # Common assumption: focal length ≈ image_width for typical cameras
-            height, width = int(self.img_shape[0]), int(self.img_shape[1])
+            # Handle different tensor shapes properly
+            img_shape_flat = self.img_shape.flatten()
+            height, width = int(img_shape_flat[0].item()), int(img_shape_flat[1].item())
             fx = fy = width  # Reasonable default focal length
             cx, cy = width / 2.0, height / 2.0  # Principal point at image center
             k1, k2, p1, p2, k3 = 0.0, 0.0, 0.0, 0.0, 0.0  # No distortion
@@ -175,7 +177,8 @@ class Frame:
             points_2d = points_2d[:2] / (points_2d[2:3] + 1e-8)  # Avoid division by zero
             
             # Create depth map
-            height, width = int(self.img_shape[0]), int(self.img_shape[1])
+            img_shape_flat = self.img_shape.flatten()
+            height, width = int(img_shape_flat[0].item()), int(img_shape_flat[1].item())
             depth_map = torch.zeros(height, width, dtype=torch.float32)
             
             # Use Z-coordinate as depth (not Euclidean distance)
@@ -348,6 +351,7 @@ class SharedKeyframes:
         self.pos = torch.zeros(buffer, 1, self.num_patches, 2, device=device, dtype=torch.long).share_memory_()
         self.is_dirty = torch.zeros(buffer, 1, device=device, dtype=torch.bool).share_memory_()
         self.K = torch.zeros(3, 3, device=device, dtype=dtype).share_memory_()
+        self.dense_depth = torch.zeros(buffer, h, w, 3, device=device, dtype=dtype).share_memory_()
         # fmt: on
 
     def __getitem__(self, idx) -> Frame:
@@ -367,6 +371,7 @@ class SharedKeyframes:
             kf.pos = self.pos[idx]
             kf.N = int(self.N[idx])
             kf.N_updates = int(self.N_updates[idx])
+            kf.dense_depth = self.dense_depth[idx]
             if config["use_calib"]:
                 kf.K = self.K
             return kf
@@ -388,6 +393,8 @@ class SharedKeyframes:
             self.pos[idx] = value.pos
             self.N[idx] = value.N
             self.N_updates[idx] = value.N_updates
+            if value.dense_depth is not None:
+                self.dense_depth[idx] = value.dense_depth
             self.is_dirty[idx] = True
             return idx
 

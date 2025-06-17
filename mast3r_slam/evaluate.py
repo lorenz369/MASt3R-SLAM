@@ -119,10 +119,9 @@ def save_trajectory_with_intrinsics_and_depth(savedir, filename, keyframes, data
     with open(logfile, "w") as f:
         for i in range(len(keyframes)):
             frame = keyframes[i]
-            # Get camera pose
-            T_WC = frame.T_WC
-            t = T_WC.t()
-            q = T_WC.q()
+            # Get camera pose - convert Sim3 to SE3 to access pose data
+            T_WC = as_SE3(frame.T_WC)
+            x, y, z, qx, qy, qz, qw = T_WC.data.numpy().reshape(-1)
             
             # Get camera intrinsics
             intrinsics = frame.get_intrinsics_string(dataset_intrinsics)
@@ -133,4 +132,4 @@ def save_trajectory_with_intrinsics_and_depth(savedir, filename, keyframes, data
                 depth_path = "none"
             
             # Write to file: frame_id x y z qx qy qz qw fx fy cx cy k1 k2 p1 p2 k3 depth_map_path
-            f.write(f"{frame.frame_id} {t[0]} {t[1]} {t[2]} {q[0]} {q[1]} {q[2]} {q[3]} {intrinsics} {depth_path}\n")
+            f.write(f"{frame.frame_id} {x} {y} {z} {qx} {qy} {qz} {qw} {intrinsics} {depth_path}\n")
