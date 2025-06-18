@@ -160,8 +160,8 @@ class Frame:
             # Filter out invalid depths (negative or very close to zero)
             depth_map[depth_map <= 1e-6] = 0.0
             
-            # Save depth map
-            depth_path = output_dir / f"depth_{self.frame_id:06d}.npy"
+            # Save depth map with consistent frame_id naming (no "depth_" prefix)
+            depth_path = output_dir / f"{self.frame_id:06d}.npy"
             np.save(depth_path, depth_map.astype(np.float32))
             
             return str(depth_path)
@@ -204,8 +204,8 @@ class Frame:
                     if current_depth == 0 or valid_depths[i] < current_depth:
                         depth_map[y, x] = valid_depths[i]
             
-            # Save depth map
-            depth_path = output_dir / f"depth_{self.frame_id:06d}.npy"
+            # Save depth map with consistent frame_id naming (no "depth_" prefix)
+            depth_path = output_dir / f"{self.frame_id:06d}.npy"
             np.save(depth_path, depth_map.cpu().numpy())
             
             return str(depth_path)

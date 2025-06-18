@@ -321,9 +321,9 @@ if __name__ == "__main__":
             last_msg.C_conf_threshold,
         )
         eval.save_keyframes(
-            save_dir / "keyframes" / seq_name, dataset.timestamps, keyframes
+            save_dir / "keyframes", dataset.timestamps, keyframes
         )
-        eval.save_trajectory_with_intrinsics_and_depth(save_dir, f"{seq_name}_with_intrinsics_and_depth.txt", keyframes, dataset.camera_intrinsics)
+        eval.save_trajectory_with_intrinsics_and_depth(save_dir, f"{seq_name}_with_intrinsics.txt", keyframes, dataset.camera_intrinsics)
     if save_frames:
         savedir = pathlib.Path(f"logs/frames/{datetime_now}")
         savedir.mkdir(exist_ok=True, parents=True)
