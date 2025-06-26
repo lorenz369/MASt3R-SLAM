@@ -297,6 +297,11 @@ if __name__ == "__main__":
             raise Exception("Invalid mode")
 
         if add_new_kf:
+            # Run MASt3R inference to get dense depth for this new keyframe
+            if frame.dense_depth is None:
+                X, C, dense_depth = mast3r_inference_mono(model, frame)
+                # Don't overwrite existing pointmap, just add dense depth
+                frame.dense_depth = dense_depth
             keyframes.append(frame)
             states.queue_global_optimization(len(keyframes) - 1)
             # In single threaded mode, wait for the backend to finish

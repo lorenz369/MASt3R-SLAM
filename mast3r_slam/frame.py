@@ -153,12 +153,17 @@ class Frame:
             output_dir = pathlib.Path(output_dir)
             output_dir.mkdir(parents=True, exist_ok=True)
             
-            # Extract Z-coordinates (depth) from the dense 3D points
-            # dense_depth shape: [height, width, 3] -> we want [:, :, 2] (Z-coordinate)
-            depth_map = self.dense_depth[:, :, 2].cpu().numpy()
+            # Extract depth as Euclidean distance from camera center
+            # This handles scale inconsistency better than raw Z-coordinates
+            depth_map = np.linalg.norm(self.dense_depth.cpu().numpy(), axis=2)
             
-            # Filter out invalid depths (negative or very close to zero)
-            depth_map[depth_map <= 1e-6] = 0.0
+            # Filter out invalid depths using adaptive threshold
+            if depth_map.max() > 0:
+                # Use a threshold relative to the scene scale
+                threshold = depth_map.max() * 1e-4  # 0.01% of max depth
+                depth_map[depth_map <= threshold] = 0.0
+            else:
+                depth_map[depth_map <= 0] = 0.0
             
             # Save depth map with consistent frame_id naming (no "depth_" prefix)
             depth_path = output_dir / f"{self.frame_id:06d}.npy"
@@ -166,51 +171,76 @@ class Frame:
             
             return str(depth_path)
             
-        elif self.X_canon is not None and self.K is not None:
-            # Fallback: reconstruct depth map from sparse points (original method)
+        elif self.X_canon is not None:
+            # Fallback: reconstruct depth map from sparse points
             output_dir = pathlib.Path(output_dir)
             output_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Project 3D points to image plane
-            # X_canon contains 3D points in camera coordinates
-            points_2d = self.K @ self.X_canon.T  # Shape: [3, N]
-            points_2d = points_2d[:2] / (points_2d[2:3] + 1e-8)  # Avoid division by zero
             
             # Create depth map
             img_shape_flat = self.img_shape.flatten()
             height, width = int(img_shape_flat[0].item()), int(img_shape_flat[1].item())
             depth_map = torch.zeros(height, width, dtype=torch.float32)
             
-            # Use Z-coordinate as depth (not Euclidean distance)
-            depths = self.X_canon[:, 2]  # Z-coordinate in camera space
-            
-            # Convert to integer pixel coordinates
-            points_2d = points_2d.T.round().long()  # Shape: [N, 2]
-            
-            # Filter valid points (within image bounds and positive depth)
-            valid = (points_2d[:, 0] >= 0) & (points_2d[:, 0] < width) & \
-                    (points_2d[:, 1] >= 0) & (points_2d[:, 1] < height) & \
-                    (depths > 0)  # Only positive depths
-            
-            # Fill depth map (handle multiple points mapping to same pixel by taking closest)
-            if valid.sum() > 0:
-                valid_points = points_2d[valid]
-                valid_depths = depths[valid]
+            if self.K is not None:
+                # Use camera intrinsics for projection
+                points_2d = self.K @ self.X_canon.T  # Shape: [3, N]
+                points_2d = points_2d[:2] / (points_2d[2:3] + 1e-8)  # Avoid division by zero
+                points_2d = points_2d.T.round().long()  # Shape: [N, 2]
                 
-                # For pixels with multiple depth values, keep the closest (minimum depth)
-                for i in range(len(valid_points)):
-                    y, x = valid_points[i, 1], valid_points[i, 0]
-                    current_depth = depth_map[y, x]
-                    if current_depth == 0 or valid_depths[i] < current_depth:
-                        depth_map[y, x] = valid_depths[i]
+                # Use Euclidean distance for consistency with dense method
+                depths = torch.norm(self.X_canon, dim=1)  # Euclidean distance
+                
+                # Filter valid points (within image bounds and positive depth)
+                valid = (points_2d[:, 0] >= 0) & (points_2d[:, 0] < width) & \
+                        (points_2d[:, 1] >= 0) & (points_2d[:, 1] < height) & \
+                        (depths > 1e-8)  # Small positive threshold
+                
+                # Fill depth map
+                if valid.sum() > 0:
+                    valid_points = points_2d[valid]
+                    valid_depths = depths[valid]
+                    
+                    for i in range(len(valid_points)):
+                        y, x = valid_points[i, 1], valid_points[i, 0]
+                        current_depth = depth_map[y, x]
+                        if current_depth == 0 or valid_depths[i] < current_depth:
+                            depth_map[y, x] = valid_depths[i]
+            else:
+                # No camera intrinsics - create a simple dense depth map from sparse points
+                # This is a simplified approach: distribute sparse depths across nearby pixels
+                depths = torch.norm(self.X_canon, dim=1)  # Euclidean distance
+                
+                if len(depths) > 0 and depths.max() > 1e-8:
+                    # Simple approach: fill a small region around each point
+                    num_points = min(len(self.X_canon), height * width // 4)  # Limit points
+                    
+                    # Sample points evenly across the image
+                    for i in range(num_points):
+                        # Distribute points across image
+                        y = int((i % int(np.sqrt(num_points))) * height / np.sqrt(num_points))
+                        x = int((i // int(np.sqrt(num_points))) * width / np.sqrt(num_points))
+                        
+                        # Use depth from corresponding sparse point
+                        if i < len(depths):
+                            depth_val = depths[i % len(depths)]
+                            if depth_val > 1e-8:
+                                # Fill a small region around this point
+                                for dy in range(-2, 3):
+                                    for dx in range(-2, 3):
+                                        py, px = y + dy, x + dx
+                                        if 0 <= py < height and 0 <= px < width:
+                                            if depth_map[py, px] == 0:
+                                                depth_map[py, px] = depth_val
             
-            # Save depth map with consistent frame_id naming (no "depth_" prefix)
+            # Save depth map with consistent frame_id naming
             depth_path = output_dir / f"{self.frame_id:06d}.npy"
             np.save(depth_path, depth_map.cpu().numpy())
             
+            print(f"Sparse depth map for frame {self.frame_id}: {(depth_map > 0).sum().item()}/{depth_map.numel()} non-zero pixels")
             return str(depth_path)
         else:
             # No depth information available
+            print(f"No depth information available for frame {self.frame_id}")
             return None
 
 

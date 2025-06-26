@@ -52,8 +52,17 @@ class AsymmetricMASt3R(AsymmetricCroCo3DStereo):
             return super(AsymmetricMASt3R, cls).from_pretrained(pretrained_model_name_or_path, **kw)
 
     def set_downstream_head(self, output_mode, head_type, landscape_only, depth_mode, conf_mode, patch_size, img_size, **kw):
-        assert img_size[0] % patch_size == 0 and img_size[
-            1] % patch_size == 0, f'{img_size=} must be multiple of {patch_size=}'
+        # Allow img_size to be provided as a scalar (e.g. 512) in older checkpoints.
+        # Convert to a 2-tuple (H, W) before performing any checks to avoid
+        # "'int' object is not subscriptable" errors encountered during model
+        # loading.
+        if isinstance(img_size, int):
+            img_size = (img_size, img_size)
+        elif isinstance(img_size, (list, tuple)) and len(img_size) == 1:
+            img_size = (img_size[0], img_size[0])
+
+        assert img_size[0] % patch_size == 0 and img_size[1] % patch_size == 0, (
+            f"{img_size=} must be multiple of {patch_size=}")
         self.output_mode = output_mode
         self.head_type = head_type
         self.depth_mode = depth_mode
