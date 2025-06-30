@@ -71,12 +71,13 @@ def save_reconstruction(savedir, filename, keyframes, c_conf_threshold):
 
 
 def save_keyframes(savedir, timestamps, keyframes: SharedKeyframes):
+    """Save keyframes as PNG images using frame_id for consistent naming with depth maps"""
     savedir = pathlib.Path(savedir)
     savedir.mkdir(exist_ok=True, parents=True)
     for i in range(len(keyframes)):
         keyframe = keyframes[i]
-        t = timestamps[keyframe.frame_id]
-        filename = savedir / f"{t}.png"
+        # Use frame_id for consistent naming with depth maps (instead of timestamp)
+        filename = savedir / f"{keyframe.frame_id:06d}.png"
         cv2.imwrite(
             str(filename),
             cv2.cvtColor(
@@ -104,3 +105,31 @@ def save_ply(filename, points, colors):
     vertex_element = PlyElement.describe(pcd, "vertex")
     ply_data = PlyData([vertex_element], text=False)
     ply_data.write(filename)
+
+
+def save_trajectory_with_intrinsics_and_depth(savedir, filename, keyframes, dataset_intrinsics=None):
+    """Save trajectory with camera intrinsics (without depth map paths since they're mapped by filename)"""
+    savedir = pathlib.Path(savedir)
+    savedir.mkdir(exist_ok=True, parents=True)
+    logfile = savedir / filename
+    
+    # Create depth maps directory (still save the depth maps)
+    depth_dir = savedir / "depth_maps"
+    depth_dir.mkdir(parents=True, exist_ok=True)
+    
+    with open(logfile, "w") as f:
+        for i in range(len(keyframes)):
+            frame = keyframes[i]
+            # Get camera pose - convert Sim3 to SE3 to access pose data
+            T_WC = as_SE3(frame.T_WC)
+            x, y, z, qx, qy, qz, qw = T_WC.data.numpy().reshape(-1)
+            
+            # Get camera intrinsics
+            intrinsics = frame.get_intrinsics_string(dataset_intrinsics)
+            
+            # Save depth map (but don't store path in trajectory file)
+            frame.save_depth_map(depth_dir)
+            
+            # Write to file: frame_id x y z qx qy qz qw fx fy cx cy k1 k2 p1 p2 k3
+            # (removed depth_map_path since it can be mapped via frame_id)
+            f.write(f"{frame.frame_id} {x} {y} {z} {qx} {qy} {qz} {qw} {intrinsics}\n")

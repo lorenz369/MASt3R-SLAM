@@ -5,6 +5,8 @@ import lietorch
 import torch
 from mast3r_slam.mast3r_utils import resize_img
 from mast3r_slam.config import config
+import pathlib
+import numpy as np
 
 
 class Mode(Enum):
@@ -29,6 +31,7 @@ class Frame:
     N: int = 0
     N_updates: int = 0
     K: Optional[torch.Tensor] = None
+    dense_depth: Optional[torch.Tensor] = None  # Store original dense depth from MASt3R
 
     def get_score(self, C):
         filtering_score = config["tracking"]["filtering_score"]
@@ -106,6 +109,139 @@ class Frame:
 
     def get_average_conf(self):
         return self.C / self.N if self.C is not None else None
+
+    def get_intrinsics_string(self, dataset_intrinsics=None):
+        """Get camera intrinsics as a string in the format: fx fy cx cy k1 k2 p1 p2 k3
+        
+        Returns:
+            str: Intrinsics string, or estimated intrinsics if no calibration available
+        """
+        if self.K is None:
+            # Estimate reasonable intrinsics based on image size
+            # Common assumption: focal length ≈ image_width for typical cameras
+            # Handle different tensor shapes properly
+            img_shape_flat = self.img_shape.flatten()
+            height, width = int(img_shape_flat[0].item()), int(img_shape_flat[1].item())
+            fx = fy = width  # Reasonable default focal length
+            cx, cy = width / 2.0, height / 2.0  # Principal point at image center
+            k1, k2, p1, p2, k3 = 0.0, 0.0, 0.0, 0.0, 0.0  # No distortion
+            return f"{fx} {fy} {cx} {cy} {k1} {k2} {p1} {p2} {k3}"
+        
+        # Get focal lengths and principal point from calibrated intrinsics
+        fx = float(self.K[0, 0])
+        fy = float(self.K[1, 1])
+        cx = float(self.K[0, 2])
+        cy = float(self.K[1, 2])
+        
+        # Get distortion coefficients from dataset intrinsics if available
+        k1, k2, p1, p2, k3 = 0.0, 0.0, 0.0, 0.0, 0.0
+        if dataset_intrinsics is not None and hasattr(dataset_intrinsics, 'distortion'):
+            distortion = dataset_intrinsics.distortion
+            if distortion is not None and len(distortion) >= 4:
+                k1 = float(distortion[0]) if len(distortion) > 0 else 0.0
+                k2 = float(distortion[1]) if len(distortion) > 1 else 0.0
+                p1 = float(distortion[2]) if len(distortion) > 2 else 0.0
+                p2 = float(distortion[3]) if len(distortion) > 3 else 0.0
+                k3 = float(distortion[4]) if len(distortion) > 4 else 0.0
+            
+        return f"{fx} {fy} {cx} {cy} {k1} {k2} {p1} {p2} {k3}"
+
+    def save_depth_map(self, output_dir):
+        """Save depth map to file and return the path"""
+        if self.dense_depth is not None:
+            # Use original dense depth map from MASt3R (preferred)
+            output_dir = pathlib.Path(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Extract depth as Euclidean distance from camera center
+            # This handles scale inconsistency better than raw Z-coordinates
+            depth_map = np.linalg.norm(self.dense_depth.cpu().numpy(), axis=2)
+            
+            # Filter out invalid depths using adaptive threshold
+            if depth_map.max() > 0:
+                # Use a threshold relative to the scene scale
+                threshold = depth_map.max() * 1e-4  # 0.01% of max depth
+                depth_map[depth_map <= threshold] = 0.0
+            else:
+                depth_map[depth_map <= 0] = 0.0
+            
+            # Save depth map with consistent frame_id naming (no "depth_" prefix)
+            depth_path = output_dir / f"{self.frame_id:06d}.npy"
+            np.save(depth_path, depth_map.astype(np.float32))
+            
+            return str(depth_path)
+            
+        elif self.X_canon is not None:
+            # Fallback: reconstruct depth map from sparse points
+            output_dir = pathlib.Path(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Create depth map
+            img_shape_flat = self.img_shape.flatten()
+            height, width = int(img_shape_flat[0].item()), int(img_shape_flat[1].item())
+            depth_map = torch.zeros(height, width, dtype=torch.float32)
+            
+            if self.K is not None:
+                # Use camera intrinsics for projection
+                points_2d = self.K @ self.X_canon.T  # Shape: [3, N]
+                points_2d = points_2d[:2] / (points_2d[2:3] + 1e-8)  # Avoid division by zero
+                points_2d = points_2d.T.round().long()  # Shape: [N, 2]
+                
+                # Use Euclidean distance for consistency with dense method
+                depths = torch.norm(self.X_canon, dim=1)  # Euclidean distance
+                
+                # Filter valid points (within image bounds and positive depth)
+                valid = (points_2d[:, 0] >= 0) & (points_2d[:, 0] < width) & \
+                        (points_2d[:, 1] >= 0) & (points_2d[:, 1] < height) & \
+                        (depths > 1e-8)  # Small positive threshold
+                
+                # Fill depth map
+                if valid.sum() > 0:
+                    valid_points = points_2d[valid]
+                    valid_depths = depths[valid]
+                    
+                    for i in range(len(valid_points)):
+                        y, x = valid_points[i, 1], valid_points[i, 0]
+                        current_depth = depth_map[y, x]
+                        if current_depth == 0 or valid_depths[i] < current_depth:
+                            depth_map[y, x] = valid_depths[i]
+            else:
+                # No camera intrinsics - create a simple dense depth map from sparse points
+                # This is a simplified approach: distribute sparse depths across nearby pixels
+                depths = torch.norm(self.X_canon, dim=1)  # Euclidean distance
+                
+                if len(depths) > 0 and depths.max() > 1e-8:
+                    # Simple approach: fill a small region around each point
+                    num_points = min(len(self.X_canon), height * width // 4)  # Limit points
+                    
+                    # Sample points evenly across the image
+                    for i in range(num_points):
+                        # Distribute points across image
+                        y = int((i % int(np.sqrt(num_points))) * height / np.sqrt(num_points))
+                        x = int((i // int(np.sqrt(num_points))) * width / np.sqrt(num_points))
+                        
+                        # Use depth from corresponding sparse point
+                        if i < len(depths):
+                            depth_val = depths[i % len(depths)]
+                            if depth_val > 1e-8:
+                                # Fill a small region around this point
+                                for dy in range(-2, 3):
+                                    for dx in range(-2, 3):
+                                        py, px = y + dy, x + dx
+                                        if 0 <= py < height and 0 <= px < width:
+                                            if depth_map[py, px] == 0:
+                                                depth_map[py, px] = depth_val
+            
+            # Save depth map with consistent frame_id naming
+            depth_path = output_dir / f"{self.frame_id:06d}.npy"
+            np.save(depth_path, depth_map.cpu().numpy())
+            
+            print(f"Sparse depth map for frame {self.frame_id}: {(depth_map > 0).sum().item()}/{depth_map.numel()} non-zero pixels")
+            return str(depth_path)
+        else:
+            # No depth information available
+            print(f"No depth information available for frame {self.frame_id}")
+            return None
 
 
 def create_frame(i, img, T_WC, img_size=512, device="cuda:0"):
@@ -245,6 +381,7 @@ class SharedKeyframes:
         self.pos = torch.zeros(buffer, 1, self.num_patches, 2, device=device, dtype=torch.long).share_memory_()
         self.is_dirty = torch.zeros(buffer, 1, device=device, dtype=torch.bool).share_memory_()
         self.K = torch.zeros(3, 3, device=device, dtype=dtype).share_memory_()
+        self.dense_depth = torch.zeros(buffer, h, w, 3, device=device, dtype=dtype).share_memory_()
         # fmt: on
 
     def __getitem__(self, idx) -> Frame:
@@ -264,6 +401,7 @@ class SharedKeyframes:
             kf.pos = self.pos[idx]
             kf.N = int(self.N[idx])
             kf.N_updates = int(self.N_updates[idx])
+            kf.dense_depth = self.dense_depth[idx]
             if config["use_calib"]:
                 kf.K = self.K
             return kf
@@ -285,6 +423,8 @@ class SharedKeyframes:
             self.pos[idx] = value.pos
             self.N[idx] = value.N
             self.N_updates[idx] = value.N_updates
+            if value.dense_depth is not None:
+                self.dense_depth[idx] = value.dense_depth
             self.is_dirty[idx] = True
             return idx
 

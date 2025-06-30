@@ -129,14 +129,18 @@ def mast3r_inference_mono(model, frame):
     X, C, D, Q = zip(
         *[(r["pts3d"][0], r["conf"][0], r["desc"][0], r["desc_conf"][0]) for r in res]
     )
-    # 4xhxwxc
+    # 2xhxwx3 - this is the original dense depth map from MASt3R!
     X, C, D, Q = torch.stack(X), torch.stack(C), torch.stack(D), torch.stack(Q)
+    
+    # Store the original dense depth map before downsampling
+    dense_depth_original = X[0]  # Take first output [h, w, 3]
+    
     X, C, D, Q = downsample(X, C, D, Q)
 
     Xii, Xji = einops.rearrange(X, "b h w c -> b (h w) c")
     Cii, Cji = einops.rearrange(C, "b h w -> b (h w) 1")
 
-    return Xii, Cii
+    return Xii, Cii, dense_depth_original
 
 
 def mast3r_match_symmetric(model, feat_i, pos_i, feat_j, pos_j, shape_i, shape_j):

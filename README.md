@@ -94,6 +94,11 @@ python main.py --dataset <path/to/video>.mp4 --config config/base.yaml --calib c
 python main.py --dataset <path/to/folder> --config config/base.yaml --calib config/intrinsics.yaml
 ```
 
+To run with custom output directory and save depth maps with intrinsics (headless mode):
+```
+python main.py --dataset <path/to/video>.MOV --config config/base.yaml --save-as <output_name> --no-viz
+```
+
 ## Downloading Dataset
 ### TUM-RGBD Dataset
 ```

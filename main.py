@@ -264,8 +264,9 @@ if __name__ == "__main__":
 
         if mode == Mode.INIT:
             # Initialize via mono inference, and encoded features neeed for database
-            X_init, C_init = mast3r_inference_mono(model, frame)
+            X_init, C_init, dense_depth = mast3r_inference_mono(model, frame)
             frame.update_pointmap(X_init, C_init)
+            frame.dense_depth = dense_depth  # Store original dense depth map
             keyframes.append(frame)
             states.queue_global_optimization(len(keyframes) - 1)
             states.set_mode(Mode.TRACKING)
@@ -280,8 +281,9 @@ if __name__ == "__main__":
             states.set_frame(frame)
 
         elif mode == Mode.RELOC:
-            X, C = mast3r_inference_mono(model, frame)
+            X, C, dense_depth = mast3r_inference_mono(model, frame)
             frame.update_pointmap(X, C)
+            frame.dense_depth = dense_depth  # Store original dense depth map
             states.set_frame(frame)
             states.queue_reloc()
             # In single threaded mode, make sure relocalization happen for every frame
@@ -295,6 +297,11 @@ if __name__ == "__main__":
             raise Exception("Invalid mode")
 
         if add_new_kf:
+            # Run MASt3R inference to get dense depth for this new keyframe
+            if frame.dense_depth is None:
+                X, C, dense_depth = mast3r_inference_mono(model, frame)
+                # Don't overwrite existing pointmap, just add dense depth
+                frame.dense_depth = dense_depth
             keyframes.append(frame)
             states.queue_global_optimization(len(keyframes) - 1)
             # In single threaded mode, wait for the backend to finish
@@ -319,8 +326,9 @@ if __name__ == "__main__":
             last_msg.C_conf_threshold,
         )
         eval.save_keyframes(
-            save_dir / "keyframes" / seq_name, dataset.timestamps, keyframes
+            save_dir / "keyframes", dataset.timestamps, keyframes
         )
+        eval.save_trajectory_with_intrinsics_and_depth(save_dir, f"{seq_name}_with_intrinsics.txt", keyframes, dataset.camera_intrinsics)
     if save_frames:
         savedir = pathlib.Path(f"logs/frames/{datetime_now}")
         savedir.mkdir(exist_ok=True, parents=True)
