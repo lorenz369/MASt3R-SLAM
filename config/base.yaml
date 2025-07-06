@@ -1,5 +1,6 @@
 use_calib: False
 single_thread: False
+intrinsics_file: null  # Path to intrinsics file in format: fx, fy, ox, oy
 dataset:
   subsample: 1
   img_downsample: 1

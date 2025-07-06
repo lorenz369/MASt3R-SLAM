@@ -1,0 +1,8 @@
+inherit: "config/base.yaml"
+
+intrinsics_file: "config/IPhone11.txt"
+use_calib: False  # We use intrinsics file instead of full calibration
+
+dataset:
+  subsample: 1
+  img_downsample: 1 

@@ -156,10 +156,17 @@ if __name__ == "__main__":
     parser.add_argument("--save-as", default="default")
     parser.add_argument("--no-viz", action="store_true")
     parser.add_argument("--calib", default="")
+    parser.add_argument("--intrinsics", default="", help="Path to intrinsics file (format: fx, fy, ox, oy)")
 
     args = parser.parse_args()
 
     load_config(args.config)
+    
+    # Set intrinsics file path in config if provided
+    if args.intrinsics:
+        config["intrinsics_file"] = args.intrinsics
+        print(f"Using intrinsics file: {args.intrinsics}")
+    
     print(args.dataset)
     print(config)
 
