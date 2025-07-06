@@ -9,6 +9,72 @@ import pathlib
 import numpy as np
 
 
+# Global variable to store loaded intrinsics
+_loaded_intrinsics = None
+
+
+def load_intrinsics_file(intrinsics_path):
+    """Load camera intrinsics from a simple text file.
+    
+    Expected format:
+    Line 1: fx, fy, ox, oy (header - ignored)
+    Line 2: focal_x, focal_y, principal_x, principal_y (values)
+    
+    Args:
+        intrinsics_path: Path to the intrinsics file
+        
+    Returns:
+        dict: Dictionary with intrinsics values or None if file doesn't exist
+    """
+    global _loaded_intrinsics
+    
+    if _loaded_intrinsics is not None:
+        return _loaded_intrinsics
+        
+    if intrinsics_path is None:
+        return None
+        
+    intrinsics_file = pathlib.Path(intrinsics_path)
+    if not intrinsics_file.exists():
+        print(f"Warning: Intrinsics file {intrinsics_path} not found")
+        return None
+    
+    try:
+        with open(intrinsics_file, 'r') as f:
+            lines = f.readlines()
+        
+        if len(lines) < 2:
+            print(f"Warning: Intrinsics file {intrinsics_path} has insufficient lines")
+            return None
+            
+        # Parse the second line which contains the values
+        values_line = lines[1].strip()
+        values = [float(x.strip()) for x in values_line.split(',')]
+        
+        if len(values) != 4:
+            print(f"Warning: Expected 4 intrinsics values, got {len(values)}")
+            return None
+            
+        fx, fy, ox, oy = values
+        
+        _loaded_intrinsics = {
+            'fx': fx,
+            'fy': fy,
+            'ox': ox,
+            'oy': oy
+        }
+        
+        print(f"Loaded intrinsics from {intrinsics_path}:")
+        print(f"  fx={fx:.4f}, fy={fy:.4f}")
+        print(f"  ox={ox:.4f}, oy={oy:.4f}")
+        
+        return _loaded_intrinsics
+        
+    except Exception as e:
+        print(f"Error loading intrinsics file {intrinsics_path}: {e}")
+        return None
+
+
 class Mode(Enum):
     INIT = 0
     TRACKING = 1
@@ -111,17 +177,37 @@ class Frame:
         return self.C / self.N if self.C is not None else None
 
     def get_intrinsics_string(self, dataset_intrinsics=None):
-        """Get camera intrinsics as a string in the format: fx fy cx cy k1 k2 p1 p2 k3
+        """Get camera intrinsics as a string in the format: width height fx fy cx cy k1 k2 p1 p2 k3
         
         Returns:
             str: Intrinsics string, or estimated intrinsics if no calibration available
         """
+        # Get image dimensions first (needed for all cases)
+        img_shape_flat = self.img_shape.flatten()
+        height, width = int(img_shape_flat[0].item()), int(img_shape_flat[1].item())
+        
         if self.K is None:
-            # Estimate reasonable intrinsics based on image size
+            # First, try to load intrinsics from file if specified in config
+            intrinsics_path = config.get("intrinsics_file")
+            loaded_intrinsics = load_intrinsics_file(intrinsics_path)
+            
+            if loaded_intrinsics is not None:
+                # Use intrinsics loaded from file
+                fx = loaded_intrinsics['fx']
+                fy = loaded_intrinsics['fy']
+                cx = loaded_intrinsics['ox']  # ox = principal point x
+                cy = loaded_intrinsics['oy']  # oy = principal point y
+                k1, k2, p1, p2, k3 = 0.0, 0.0, 0.0, 0.0, 0.0  # No distortion
+                
+                print(f"Using loaded camera intrinsics:")
+                print(f"  fx={fx:.4f}, fy={fy:.4f}")
+                print(f"  cx={cx:.4f}, cy={cy:.4f}")
+                
+                return f"{width} {height} {fx} {fy} {cx} {cy} {k1} {k2} {p1} {p2} {k3}"
+            
+            # Fallback: Estimate reasonable intrinsics based on image size
             # Based on real smartphone camera measurements (iPhone data shows fx/width ≈ 0.8-0.9)
             # This gives focal_length ≈ 0.85 * max(width, height) for typical smartphone cameras
-            img_shape_flat = self.img_shape.flatten()
-            height, width = int(img_shape_flat[0].item()), int(img_shape_flat[1].item())
             
             # Use smartphone-calibrated focal length estimate
             # Based on iPhone camera specs: fx ≈ 0.8-0.9 × max_dimension
@@ -136,7 +222,7 @@ class Frame:
             print(f"  fx/max_dim ratio: {fx/max_dim:.2f}")
             print(f"  cx={cx:.1f}, cy={cy:.1f}")
             
-            return f"{fx} {fy} {cx} {cy} {k1} {k2} {p1} {p2} {k3}"
+            return f"{width} {height} {fx} {fy} {cx} {cy} {k1} {k2} {p1} {p2} {k3}"
         
         # Get focal lengths and principal point from calibrated intrinsics
         fx = float(self.K[0, 0])
@@ -155,7 +241,7 @@ class Frame:
                 p2 = float(distortion[3]) if len(distortion) > 3 else 0.0
                 k3 = float(distortion[4]) if len(distortion) > 4 else 0.0
             
-        return f"{fx} {fy} {cx} {cy} {k1} {k2} {p1} {p2} {k3}"
+        return f"{width} {height} {fx} {fy} {cx} {cy} {k1} {k2} {p1} {p2} {k3}"
 
     def save_depth_map(self, output_dir):
         """Save depth map to file and return the path"""
@@ -266,6 +352,59 @@ def create_frame(i, img, T_WC, img_size=512, device="cuda:0"):
         uimg = uimg[::downsample, ::downsample]
         img_shape = img_shape // downsample
     frame = Frame(i, rgb, img_shape, img_true_shape, uimg, T_WC)
+    
+    # Set intrinsics matrix K if loaded from file
+    intrinsics_path = config.get("intrinsics_file")
+    loaded_intrinsics = load_intrinsics_file(intrinsics_path)
+    if loaded_intrinsics is not None:
+        # Create camera intrinsics matrix from loaded values
+        fx = loaded_intrinsics['fx']
+        fy = loaded_intrinsics['fy']
+        cx = loaded_intrinsics['ox']
+        cy = loaded_intrinsics['oy']
+        
+        # Get original image dimensions (this should match the intrinsics)
+        # We need to determine the original image size that matches the intrinsics
+        # For now, we'll assume a typical high-resolution smartphone image
+        # In practice, this should be derived from the actual input image dimensions
+        # before any resizing, or stored in the intrinsics file
+        
+        # Since we can't easily get the original image size at this point,
+        # we'll estimate based on the provided intrinsics principal point
+        # This is a reasonable approximation for smartphone cameras
+        orig_width = int(cx * 2)  # Assume principal point is roughly centered
+        orig_height = int(cy * 2)
+        
+        # Get transformation parameters for the current image processing pipeline
+        dummy_img = np.zeros((orig_height, orig_width, 3))
+        _, (scale_w, scale_h, half_crop_w, half_crop_h) = resize_img(
+            dummy_img, img_size, return_transformation=True
+        )
+        
+        # Apply the same transformation logic as the Intrinsics class
+        K_orig = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]])
+        K_frame = K_orig.copy()
+        K_frame[0, 0] = K_orig[0, 0] / scale_w  # fx scaling
+        K_frame[1, 1] = K_orig[1, 1] / scale_h  # fy scaling  
+        K_frame[0, 2] = K_orig[0, 2] / scale_w - half_crop_w  # cx translation
+        K_frame[1, 2] = K_orig[1, 2] / scale_h - half_crop_h  # cy translation
+        
+        # Apply downsampling if needed
+        if downsample > 1:
+            K_frame[0, 0] /= downsample  # fx
+            K_frame[1, 1] /= downsample  # fy
+            K_frame[0, 2] /= downsample  # cx
+            K_frame[1, 2] /= downsample  # cy
+        
+        # Create intrinsics matrix
+        K = torch.tensor(K_frame, device=device, dtype=torch.float32)
+        frame.K = K
+        
+        print(f"Set K matrix for frame {i} from intrinsics file:")
+        print(f"  Original: fx={fx:.1f}, fy={fy:.1f}, cx={cx:.1f}, cy={cy:.1f}")
+        print(f"  Scaled: fx={K_frame[0,0]:.1f}, fy={K_frame[1,1]:.1f}, cx={K_frame[0,2]:.1f}, cy={K_frame[1,2]:.1f}")
+        print(f"  Transformation: scale_w={scale_w:.3f}, scale_h={scale_h:.3f}, crop_w={half_crop_w:.1f}, crop_h={half_crop_h:.1f}, downsample={downsample}")
+    
     return frame
 
 
